@@ -2,8 +2,8 @@ import Utils
 from worlds.AutoWorld import World
 from worlds.Files import APDeltaPatch
 from .Aesthetics import generate_shuffled_header_data, generate_shuffled_ow_palettes, generate_curated_level_palette_data, generate_curated_map_palette_data, generate_shuffled_sfx
-from .Levels import level_info_dict, full_bowser_rooms, standard_bowser_rooms, submap_boss_rooms, ow_boss_rooms
-from .Names.TextBox import generate_goal_text, title_text_mapping, generate_text_box
+from .Levels import level_info_dict, tile_types, offscreen_events, full_bowser_rooms, standard_bowser_rooms, submap_boss_rooms, ow_boss_rooms
+from .Names.TextBox import generate_goal_text, title_text_mapping, stage_text_mapping, generate_text_box, generate_credits
 
 USHASH = 'cdd3c8c37322978ca8669b34bc89c804'
 ROM_PLAYER_LIMIT = 65535
@@ -49,10 +49,14 @@ item_rom_data = {
 
 trap_rom_data = {
     0xBC0013: [0x0086, 0x1, 0x0E],  # Ice Trap
+    0xBC001E: [0x0086, 0x0, 0x0E],  # Ice Untrap
     0xBC0014: [0x18BD, 0x7F, 0x18], # Stun Trap
     0xBC0016: [0x0F31, 0x1],        # Timer Trap
-    0xBC001C: [0x18B4, 0x1, 0x44],  # Reverse controls trap
+    0xBC001F: [0x0F31, 0x3, 0x22],  # Timer Untrap
+    0xBC001C: [0x18B4, 0x1, 0x44],  # Reverse Trap
+    0xBC0020: [0x18B4, 0x0, 0x44],  # Reverse Untrap
     0xBC001D: [0x18B7, 0x1],        # Thwimp Trap
+    0xBC0021: [0x0DC2, 0x0, 0x38],  # Dry Trap
 }
 
 
@@ -602,7 +606,7 @@ def handle_bowser_damage(rom):
     return
 
 
-def handle_level_shuffle(rom, active_level_dict):
+def handle_level_shuffle(rom, world: World, active_level_dict):
     rom.write_bytes(0x37600, bytearray([0x00] * 0x800)) # Duplicate Level Table
 
     rom.write_bytes(0x2D89C, bytearray([0x00, 0xF6, 0x06])) # Level Load Pointer
@@ -649,6 +653,23 @@ def handle_level_shuffle(rom, active_level_dict):
     rom.write_bytes(SNAKE_BLOCKS_SUB_ADDR + 0x10, bytearray([0x60]))                   # RTS
     ### End Fix Snake Blocks
 
+    ### Allow Re-entering Switch Palaces
+    rom.write_bytes(0x2114C, bytearray([0x5C, 0x17, 0xDD, 0x05])) # JML $05DD17
+
+    SWITCH_PALACE_SUB_ADDR = 0x02DD17
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x00, bytearray([0x08]))                   # PHP
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x01, bytearray([0xC9, 0x81]))             # CMP #81
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x03, bytearray([0xF0, 0x0D]))             # BEQ +0x0D
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x05, bytearray([0xC9, 0x85]))             # CMP #85
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x07, bytearray([0xF0, 0x09]))             # BEQ +0x09
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x09, bytearray([0xC9, 0x86]))             # CMP #86
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x0B, bytearray([0xF0, 0x05]))             # BEQ +0x05
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x0D, bytearray([0x28]))                   # PLP
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x0E, bytearray([0x5C, 0x50, 0x91, 0x04])) # JML $049150
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x12, bytearray([0x28]))                   # PLP
+    rom.write_bytes(SWITCH_PALACE_SUB_ADDR + 0x13, bytearray([0x5C, 0x9F, 0x91, 0x04])) # JML $04919F
+    ### End Allow Re-entering Switch Palaces
+
     for level_id, level_data in level_info_dict.items():
         if level_id not in active_level_dict.keys():
             continue
@@ -662,9 +683,191 @@ def handle_level_shuffle(rom, active_level_dict):
         rom.write_byte(tile_data.levelIDAddress, level_id)
         rom.write_byte(0x2D608 + level_id, tile_data.eventIDValue)
 
+    tiles_o = list(tile_types.keys())
+    tiles_s = tiles_o.copy()
+    world.random.shuffle(tiles_s)
+    consistent_tile_mapping: dict[int, int] = dict(zip(tiles_o, tiles_s))
+    singularity_tile = world.random.choice(tiles_o)
+
     for level_id, tile_id in active_level_dict.items():
         rom.write_byte(0x37F70 + level_id, tile_id)
         rom.write_byte(0x37F00 + tile_id, level_id)
+
+        tile_tile_data = level_info_dict[tile_id].tile_data
+        if tile_tile_data is None:
+            continue
+        start_revealed: bool = tile_tile_data.start_revealed
+        level_tile_data = level_info_dict[level_id].tile_data
+        if level_tile_data is None:
+            continue
+
+        tile_x = tile_tile_data.coords[0]
+        tile_y = tile_tile_data.coords[1]
+
+        address = 0x0677DF + ((tile_y >> 4) * 2 + (tile_x >> 4)) * 0x100 + (tile_y & 0xF) * 0x010 + (tile_x & 0xF) - (tile_y >=0x20)
+
+        new_tile_type: int = tile_tile_data.original_tile
+        if world.options.level_tile_shuffle == "vanilla":
+            new_tile_type = tile_tile_data.original_tile
+        elif world.options.level_tile_shuffle == "matching":
+            new_tile_type = level_tile_data.original_tile
+        elif world.options.level_tile_shuffle == "consistent_vanilla":
+            new_tile_type = consistent_tile_mapping[tile_tile_data.original_tile]
+        elif world.options.level_tile_shuffle == "consistent_matching":
+            new_tile_type = consistent_tile_mapping[level_tile_data.original_tile]
+        elif world.options.level_tile_shuffle == "full":
+            new_tile_type = world.random.choice(tiles_o)
+        elif world.options.level_tile_shuffle == "singularity":
+            new_tile_type = singularity_tile
+
+        # Remove and add Castle Top pieces
+        if new_tile_type == 0x5D and not tile_tile_data.forbid_castle_top:
+            rom.write_byte(address - 0x10, 0x4C)
+        elif tile_tile_data.original_tile == 0x5D:
+            rom.write_byte(address - 0x10, 0x10)
+
+        # Handle Offscreen event tiles
+        if tile_id in offscreen_events:
+            rom.write_byte(0x26994 + (offscreen_events[tile_id] * 2), tile_types[new_tile_type])
+
+        if tile_tile_data.start_revealed:
+            new_tile_type = tile_types[new_tile_type]
+
+        rom.write_byte(address, new_tile_type)
+
+
+def shuffle_level_name_pieces(rom, world: World, allow_duplicates: bool) -> list[str]:
+    from .Levels import level_name_data
+
+    used_name_pieces: list[str] = []
+
+    for level_name in level_name_data:
+        if level_name.possible_names[0] == " ":
+            used_name_pieces.append("")
+            continue
+        shuffled_piece_bytes = bytearray()
+
+        loop_guard = 0
+        shuffled_piece = ""
+        while True:
+            shuffled_piece = world.random.choice(level_name.possible_names)
+            loop_guard += 1
+            if shuffled_piece not in used_name_pieces or allow_duplicates or loop_guard >= 50:
+                break
+
+        used_name_pieces.append(shuffled_piece)
+
+        i = 0
+        while i < len(shuffled_piece):
+            if shuffled_piece[i] == "@":
+                # Do weird thing with special characters
+                shuffled_piece_bytes.append(int(shuffled_piece[i+1:i+3], 16))
+                i += 2
+            else:
+                shuffled_piece_bytes.append(stage_text_mapping[shuffled_piece[i]])
+            i += 1
+
+        shuffled_piece_bytes[-1] += 0x80
+
+        rom.write_bytes(level_name.address, shuffled_piece_bytes)
+
+    return used_name_pieces
+
+
+def build_names(rom, world: World, allow_duplicates: bool, used_name_pieces: list[str]):
+    used_names: list[str] = []
+
+    for i in range(0x5D):
+        if i == 0x31 or i == 0x32:
+            # Don't shuffle Front/Back Door names
+            continue
+        loop_guard = 0
+        while True:
+            loop_guard += 1
+            if loop_guard >= 50:
+                break
+
+            part_1 = world.random.randint(0, 0x1E)
+            part_2 = world.random.randint(0, 0xE)
+            part_3 = world.random.randint(0, 0xC)
+
+            part_1_str = used_name_pieces[part_1]
+            part_2_str = used_name_pieces[0x1F + part_2]
+            part_3_str = used_name_pieces[0x2E + part_3]
+
+            full_name = part_1_str + part_2_str + part_3_str
+
+            name_length = len(full_name) - (full_name.count("@") * 2)
+            if name_length == 0 or name_length > 19:
+                continue
+
+            if full_name in used_names and not allow_duplicates:
+                break
+
+            used_names.append(full_name)
+            name_index = bytearray([(part_2 << 4) | part_3, part_1])
+            rom.write_bytes(0x220FC + i*2, name_index)
+
+            break
+
+
+def build_names_singularity(rom, world: World, used_name_pieces: list[str]):
+    used_names: list[str] = []
+
+    name_index = bytearray()
+    loop_guard = 0
+    while True:
+        loop_guard += 1
+        if loop_guard >= 50:
+            name_index.append(0x20)
+            name_index.append(0x0D)
+            break
+
+        part_1 = world.random.randint(0, 0x1E)
+        part_2 = world.random.randint(0, 0xE)
+        part_3 = world.random.randint(0, 0xC)
+
+        part_1_str = used_name_pieces[part_1]
+        part_2_str = used_name_pieces[0x1F + part_2]
+        part_3_str = used_name_pieces[0x2E + part_3]
+
+        full_name = part_1_str + part_2_str + part_3_str
+
+        name_length = len(full_name) - (full_name.count("@") * 2)
+        if name_length > 0 and name_length <= 19:
+            name_index.append((part_2 << 4) | part_3)
+            name_index.append(part_1)
+            break
+
+    for i in range(0x5D):
+        if i == 0x31 or i == 0x32:
+            # Don't shuffle Front/Back Door names
+            continue
+        rom.write_bytes(0x220FC + i*2, name_index)
+
+
+def handle_level_name_shuffle(rom, world: World):
+    if world.options.level_name_shuffle == "vanilla":
+        rom.write_bytes(0x220FC + (0x58 * 2), bytearray([0xC1, 0x02]))
+        rom.write_bytes(0x220FC + (0x54 * 2), bytearray([0xC2, 0x02]))
+        rom.write_bytes(0x220FC + (0x56 * 2), bytearray([0xC3, 0x02]))
+        rom.write_bytes(0x220FC + (0x59 * 2), bytearray([0xC4, 0x02]))
+        rom.write_bytes(0x220FC + (0x5A * 2), bytearray([0xC5, 0x02]))
+    elif world.options.level_name_shuffle == "consistent":
+        # Randomize just the name piece strings, checking for duplicate pieces
+        used_name_pieces = shuffle_level_name_pieces(rom, world, False)
+    elif world.options.level_name_shuffle == "sane":
+        # Randomize the name piece strings, checking for duplicate pieces, and the name offsets, checking for duplicate full names
+        used_name_pieces = shuffle_level_name_pieces(rom, world, False)
+        build_names(rom, world, False, used_name_pieces)
+    elif world.options.level_name_shuffle == "full":
+        # Randomize the name piece strings, and the name offsets
+        used_name_pieces = shuffle_level_name_pieces(rom, world, True)
+        build_names(rom, world, True, used_name_pieces)
+    elif world.options.level_name_shuffle == "singularity":
+        # Randomize the name piece strings, and set all the name offsets the same
+        used_name_pieces = shuffle_level_name_pieces(rom, world, True)
+        build_names_singularity(rom, world, used_name_pieces)
 
 
 def handle_collected_paths(rom):
@@ -2948,6 +3151,18 @@ def handle_boss_shuffle(rom, world: World):
                 rom.write_byte(ow_boss_rooms[i].exitAddressAlt, chosen_ow_boss.roomID)
 
 
+def handle_boss_health(rom, world: World):
+    # Bowser
+    rom.write_byte(0x1A10B, world.options.bowser_health.value)
+    rom.write_byte(0x1A683, world.options.bowser_health.value)
+
+    # Koopalings
+    rom.write_byte(0xCFCD, world.options.koopaling_health.value)
+    rom.write_byte(0xD3FF, world.options.koopaling_health.value * 4)
+    rom.write_byte(0x1CE1A, world.options.koopaling_health.value)
+    rom.write_byte(0x1CED4, world.options.koopaling_health.value)
+
+
 def patch_rom(world: World, rom, player, active_level_dict):
     goal_text = generate_goal_text(world)
 
@@ -2957,8 +3172,12 @@ def patch_rom(world: World, rom, player, active_level_dict):
     intro_text = generate_text_box("Bowser has stolen all of Mario's abilities. Can you help Mario travel across Dinosaur land to get them back and save the Princess from him?")
     rom.write_bytes(0x2A5D9, intro_text)
 
+    credits_text = generate_credits()
+    rom.write_bytes(0x615C7, credits_text)
+
     handle_bowser_rooms(rom, world)
     handle_boss_shuffle(rom, world)
+    handle_boss_health(rom, world)
 
     # Handle ROM expansion
     rom.write_bytes(0x07FD7, bytearray([0x0A]))
@@ -3119,7 +3338,8 @@ def patch_rom(world: World, rom, player, active_level_dict):
     rom.write_bytes(0x0116A, text_data_bottom_props)
 
     # Handle Level Shuffle
-    handle_level_shuffle(rom, active_level_dict)
+    handle_level_shuffle(rom, world, active_level_dict)
+    handle_level_name_shuffle(rom, world)
 
     # Handle Music Shuffle
     if world.options.music_shuffle != "none":

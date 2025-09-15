@@ -11,7 +11,7 @@ from worlds.generic.Rules import add_rule, exclusion_rules
 
 from .Client import SMWSNIClient
 from .Items import SMWItem, ItemData, item_table, junk_table
-from .Levels import full_level_list, generate_level_list, location_id_to_level_id
+from .Levels import full_level_list, generate_level_list, location_id_to_level_id, levels_by_logic_gate, easy_castle_fortress_levels, hard_castle_fortress_levels
 from .Locations import SMWLocation, all_locations, setup_locations, special_zone_level_names, special_zone_dragon_coin_names, special_zone_hidden_1up_names, special_zone_blocksanity_names
 from .Names import ItemName, LocationName
 from .Options import SMWOptions, smw_option_groups
@@ -111,11 +111,26 @@ class SMWWorld(World):
         connect_regions(self, self.active_level_dict)
 
         # Add Boss Token amount requirements for Worlds
-        add_rule(self.multiworld.get_region(LocationName.donut_plains_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 1))
-        add_rule(self.multiworld.get_region(LocationName.vanilla_dome_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 2))
-        add_rule(self.multiworld.get_region(LocationName.forest_of_illusion_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 4))
-        add_rule(self.multiworld.get_region(LocationName.chocolate_island_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 5))
-        add_rule(self.multiworld.get_region(LocationName.valley_of_bowser_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 6))
+        if self.options.castles_anywhere:
+            castles_per_section: list[int] = [0, 0, 0, 0, 0]
+            for level_id, tile_id in self.active_level_dict.items():
+                if level_id in easy_castle_fortress_levels or level_id in hard_castle_fortress_levels:
+                    for i in range(5):
+                        if tile_id in levels_by_logic_gate[i]:
+                            castles_per_section[i] += 1
+                            break
+
+            add_rule(self.multiworld.get_region(LocationName.donut_plains_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, min(castles_per_section[0], 1)))
+            add_rule(self.multiworld.get_region(LocationName.vanilla_dome_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, min(castles_per_section[1], 2)))
+            add_rule(self.multiworld.get_region(LocationName.forest_of_illusion_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, min(castles_per_section[2], 4)))
+            add_rule(self.multiworld.get_region(LocationName.chocolate_island_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, min(castles_per_section[3], 5)))
+            add_rule(self.multiworld.get_region(LocationName.valley_of_bowser_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, min(castles_per_section[4], 6)))
+        else:
+            add_rule(self.multiworld.get_region(LocationName.donut_plains_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 1))
+            add_rule(self.multiworld.get_region(LocationName.vanilla_dome_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 2))
+            add_rule(self.multiworld.get_region(LocationName.forest_of_illusion_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 4))
+            add_rule(self.multiworld.get_region(LocationName.chocolate_island_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 5))
+            add_rule(self.multiworld.get_region(LocationName.valley_of_bowser_1_tile, self.player).entrances[0], lambda state: state.has(ItemName.koopaling, self.player, 6))
 
         exclusion_pool = set()
         if self.options.exclude_special_zone:
@@ -177,11 +192,15 @@ class SMWWorld(World):
         junk_count = total_required_locations - len(itempool)
         trap_weights = []
         trap_weights += ([ItemName.ice_trap] * self.options.ice_trap_weight.value)
+        trap_weights += ([ItemName.ice_untrap] * min(self.options.ice_trap_weight.value, self.options.ice_untrap_weight.value))
         trap_weights += ([ItemName.stun_trap] * self.options.stun_trap_weight.value)
         trap_weights += ([ItemName.literature_trap] * self.options.literature_trap_weight.value)
         trap_weights += ([ItemName.timer_trap] * self.options.timer_trap_weight.value)
+        trap_weights += ([ItemName.timer_untrap] * min(self.options.timer_trap_weight.value, self.options.timer_untrap_weight.value))
         trap_weights += ([ItemName.reverse_controls_trap] * self.options.reverse_trap_weight.value)
+        trap_weights += ([ItemName.reverse_controls_untrap] * min(self.options.reverse_trap_weight.value, self.options.reverse_untrap_weight.value))
         trap_weights += ([ItemName.thwimp_trap] * self.options.thwimp_trap_weight.value)
+        trap_weights += ([ItemName.dry_trap] * self.options.dry_trap_weight.value)
         trap_count = 0 if (len(trap_weights) == 0) else math.ceil(junk_count * (self.options.trap_fill_percentage.value / 100.0))
         junk_count -= trap_count
 
@@ -303,16 +322,18 @@ class SMWWorld(World):
     def create_item(self, name: str, force_non_progression=False) -> Item:
         data = item_table[name]
 
+        classification = ItemClassification.filler
         if force_non_progression:
             classification = ItemClassification.filler
         elif name == ItemName.yoshi_egg:
-            classification = ItemClassification.progression_skip_balancing
+            classification |= ItemClassification.progression_skip_balancing
         elif data.progression:
-            classification = ItemClassification.progression
-        elif data.trap:
-            classification = ItemClassification.trap
-        else:
-            classification = ItemClassification.filler
+            classification |= ItemClassification.progression
+
+        if data.trap:
+            classification |= ItemClassification.trap
+        if data.useful:
+            classification |= ItemClassification.useful
 
         created_item = SMWItem(name, classification, data.code, self.player)
 
